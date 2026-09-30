@@ -1,0 +1,18 @@
+# Development Dockerfile for SentinelExam Frontend
+# Provides Node.js, npm, Vite dev server, and build/typecheck tooling.
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Pre-copy package manifests
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm install
+
+# Expose Vite dev server port
+EXPOSE 3000
+
+# Default command starts Vite development server
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

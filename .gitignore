@@ -1,0 +1,45 @@
+# System / Environment
+.env
+.env.local
+*.env
+!.env.example
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Backend (Go)
+backend/bin/
+backend/dist/
+backend/tmp/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+backend/coverage.out
+backend/coverage.html
+
+# Frontend (Node / Vite / React)
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.cache/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Infrastructure / Temporal / DB Local state
+infra/docker/data/
+docker-compose.override.yml

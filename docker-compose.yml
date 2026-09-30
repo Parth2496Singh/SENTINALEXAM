@@ -1,0 +1,204 @@
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Backend Service - Go REST API & Runtime
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: sentinel-backend
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - HTTP_PORT=8080
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${DATABASE_USER:-sentinel}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-sentinel_dev_password}
+      - DATABASE_NAME=${DATABASE_NAME:-sentinelexam}
+      - DATABASE_SSLMODE=disable
+      - NATS_URL=nats://nats:4222
+      - TEMPORAL_HOST_PORT=temporal:7233
+      - KEYCLOAK_URL=http://keycloak:8080
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-sentinel}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-sentinel-api}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET:-sentinel-client-secret}
+      - KEYCLOAK_ISSUER=http://keycloak:8080/realms/sentinel
+      - KEYCLOAK_AUDIENCE=${KEYCLOAK_AUDIENCE:-sentinel-api}
+      - METRICS_PORT=9090
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+      - OTEL_SERVICE_NAME=sentinel-backend
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # 2. Frontend Service - React + Vite Dev Server
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: sentinel-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8080/api/v1
+      - VITE_KEYCLOAK_URL=http://localhost:8081
+      - VITE_KEYCLOAK_REALM=${VITE_KEYCLOAK_REALM:-sentinel}
+      - VITE_KEYCLOAK_CLIENT_ID=${VITE_KEYCLOAK_CLIENT_ID:-sentinel-frontend}
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # 3. PostgreSQL - Authoritative Transactional Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: sentinel-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DATABASE_USER:-sentinel}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-sentinel_dev_password}
+      POSTGRES_DB: ${DATABASE_NAME:-sentinelexam}
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-sentinel} -d ${DATABASE_NAME:-sentinelexam}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # 4. NATS JetStream - Durable Event Backbone & Distribution
+  # ---------------------------------------------------------------------------
+  nats:
+    image: nats:2.10-alpine
+    container_name: sentinel-nats
+    restart: unless-stopped
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222" # NATS client port
+      - "8222:8222" # HTTP management/monitoring
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # 5. Keycloak - Identity and Access Management
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: sentinel-keycloak
+    restart: unless-stopped
+    command: ["start-dev"]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_dev_password}
+      KC_HTTP_PORT: 8080
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080; echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # 6. Temporal - Workflow Engine (Auto-setup development container)
+  # ---------------------------------------------------------------------------
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    container_name: sentinel-temporal
+    restart: unless-stopped
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=${DATABASE_USER:-sentinel}
+      - POSTGRES_PWD=${DATABASE_PASSWORD:-sentinel_dev_password}
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=/etc/temporal/config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233" # Temporal gRPC frontend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks:
+      - sentinel-net
+
+  temporal-ui:
+    image: temporalio/ui:2.26.0
+    container_name: sentinel-temporal-ui
+    restart: unless-stopped
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8233:8080" # Temporal Web UI
+    depends_on:
+      - temporal
+    networks:
+      - sentinel-net
+
+  # ---------------------------------------------------------------------------
+  # 7. Toxiproxy - Chaos Testing & Network Degradation Simulation
+  # ---------------------------------------------------------------------------
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: sentinel-toxiproxy
+    restart: unless-stopped
+    ports:
+      - "8474:8474" # HTTP API
+      - "8475:8475" # Proxy port 1
+      - "8476:8476" # Proxy port 2
+    networks:
+      - sentinel-net
+
+networks:
+  sentinel-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: sentinel_postgres_data
+  nats_data:
+    name: sentinel_nats_data
+  frontend_node_modules:
+    name: sentinel_frontend_node_modules
